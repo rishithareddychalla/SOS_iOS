@@ -1,19 +1,16 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:geolocator/geolocator.dart';
-
-import 'package:telephony/telephony.dart';
-import 'package:flutter_phone_direct_caller/flutter_phone_direct_caller.dart';
-import 'package:phone_state/phone_state.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'contacts_screen.dart';
-import 'calling_screen.dart';
+import 'sos_in_progress_screen.dart';
 
 // --- State Management ---
 
@@ -73,95 +70,26 @@ class ContactsNotifier
   }
 }
 
-final sequentialCallProvider =
-    StateNotifierProvider<SequentialCallNotifier, List<String>>((ref) {
-      return SequentialCallNotifier();
-    });
+final router = GoRouter(
+  initialLocation: '/',
+  routes: [
+    GoRoute(
+      path: '/',
+      builder: (context, state) => const MainScreen(),
+    ),
+    GoRoute(
+      path: '/contacts',
+      builder: (context, state) => const ContactsScreen(),
+    ),
+    GoRoute(
+      path: '/sos_in_progress',
+      builder: (context, state) => const SosInProgressScreen(),
+    ),
+  ],
+);
 
-class SequentialCallNotifier extends StateNotifier<List<String>> {
-  StreamSubscription<PhoneState>? _callStateSubscription;
-  int _currentIndex = 0;
-  bool _isCalling = false;
-  bool _wasInCall = false;
-  Timer? _nextCallTimer; // <-- add this
-
-  SequentialCallNotifier() : super([]);
-
-  void startSOS(List<String> numbers) {
-    if (numbers.isEmpty) return;
-    state = List.from(numbers);
-    _currentIndex = 0;
-    _listenToCallStates();
-    _callCurrentNumber();
-  }
-
-  void _callCurrentNumber() async {
-    if (_currentIndex >= state.length) {
-      stopSOS();
-      return;
-    }
-
-    final numberToCall = state[_currentIndex];
-    debugPrint('📞 Attempting to call number: $numberToCall');
-    try {
-      _isCalling = true;
-      _wasInCall = false;
-      await FlutterPhoneDirectCaller.callNumber(numberToCall);
-    } catch (e) {
-      debugPrint('❌ Error calling $numberToCall: $e');
-      _advanceToNext();
-    }
-  }
-
-  void _advanceToNext() {
-    debugPrint('✅ Call finished with ${state[_currentIndex]}');
-    _isCalling = false;
-    _currentIndex++;
-
-    if (_currentIndex < state.length) {
-      debugPrint('➡️ Moving to next number in 2 seconds...');
-      _nextCallTimer = Timer(const Duration(seconds: 2), _callCurrentNumber);
-    } else {
-      debugPrint('🏁 Finished all calls.');
-      stopSOS();
-    }
-  }
-
-  void _listenToCallStates() {
-    _callStateSubscription?.cancel();
-    _callStateSubscription = PhoneState.stream.listen((phoneState) {
-      debugPrint('📲 Received call state: ${phoneState.status}');
-
-      if (!_isCalling) return;
-
-      if (phoneState.status == PhoneStateStatus.CALL_STARTED) {
-        _wasInCall = true;
-      }
-
-      if (phoneState.status == PhoneStateStatus.CALL_ENDED && _wasInCall) {
-        _wasInCall = false;
-        _advanceToNext();
-      }
-    });
-  }
-
-  void stopSOS() {
-    debugPrint('🛑 Stopping SOS, cancelling call listener.');
-    _callStateSubscription?.cancel();
-    _nextCallTimer?.cancel(); // <-- cancel future scheduled calls
-    state = [];
-    _currentIndex = 0;
-    _isCalling = false;
-    _wasInCall = false;
-  }
-
-  @override
-  void dispose() {
-    _callStateSubscription?.cancel();
-    _nextCallTimer?.cancel();
-    super.dispose();
-  }
-}
+final sosInProgressProvider = StateProvider<bool>((ref) => false);
+final sosNotifiedProvider = StateProvider<List<bool>>((ref) => []);
 
 // --- UI and App Setup ---
 
@@ -175,18 +103,23 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp.router(
+    return CupertinoApp.router(
       debugShowCheckedModeBanner: false,
       title: 'SOS',
-      theme: ThemeData(
-        
-        textTheme: const TextTheme(
-          headlineMedium: TextStyle(
-            fontSize: 48,
+      theme: const CupertinoThemeData(
+        primaryColor: Color(0xFFB51963),
+        scaffoldBackgroundColor: Colors.white,
+        textTheme: CupertinoTextThemeData(
+          navLargeTitleTextStyle: TextStyle(
             fontWeight: FontWeight.bold,
-            color: Colors.white,
+            color: CupertinoColors.white,
+            fontSize: 34,
           ),
-          bodyMedium: TextStyle(fontSize: 16, color: Colors.black54),
+          navTitleTextStyle: TextStyle(
+            fontWeight: FontWeight.bold,
+            color: CupertinoColors.white,
+            fontSize: 17,
+          ),
         ),
       ),
       routerConfig: router,
@@ -216,13 +149,7 @@ class MainScreen extends ConsumerWidget {
     });
 
     if (!allGranted && context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'All permissions are required. Please check app settings.',
-          ),
-        ),
-      );
+      _showCupertinoError(context, 'All permissions are required. Please check app settings.');
       await openAppSettings();
     }
     return allGranted;
@@ -247,136 +174,117 @@ class MainScreen extends ConsumerWidget {
   Future<void> _handleSOS(BuildContext context, WidgetRef ref) async {
     final contactList = ref.read(contactsProvider).value ?? [];
     if (contactList.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No emergency contacts added!')),
-      );
+      _showCupertinoError(context, 'No emergency contacts have been added.');
       return;
     }
 
     final hasPermissions = await _requestPermissions(context);
-    if (!hasPermissions) return;
-
-    try {
-      final position = await _determinePosition();
-      final locationMessage =
-          "Emergency! I need help. My current location is: https://www.google.com/maps/search/?api=1&query=${position.latitude},${position.longitude}";
-      final phoneNumbers = contactList.map((c) => c['phone']!).toList();
-
-      final telephony = Telephony.instance;
-      for (var number in phoneNumbers) {
-        await telephony.sendSms(to: number, message: locationMessage);
-      }
-
-      // Start the sequential caller
-      ref.read(sequentialCallProvider.notifier).startSOS(phoneNumbers);
-
-      // NOW that all the work has started, navigate to the calling screen.
-      if (context.mounted) {
-        context.go('/calling');
-      }
-    } catch (e) {
-      debugPrint('An error occurred during SOS setup: $e');
-      if (context.mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('An error occurred: $e')));
-      }
+    if (!hasPermissions) {
+      _showCupertinoError(
+        context,
+        'Location and Contacts permissions are required to use the SOS feature.',
+      );
+      return;
     }
+
+    ref.read(sosInProgressProvider.notifier).state = true;
+    ref.read(sosNotifiedProvider.notifier).state = List<bool>.filled(contactList.length, false);
+    context.go('/sos_in_progress');
+  }
+
+  void _showCupertinoError(BuildContext context, String message) {
+    showCupertinoDialog(
+      context: context,
+      builder: (context) => CupertinoAlertDialog(
+        title: const Text('Error'),
+        content: Text(message),
+        actions: [
+          CupertinoDialogAction(
+            child: const Text('OK'),
+            onPressed: () => Navigator.of(context).pop(),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Image.asset(
-          'assets/images/logo_white.png', // your logo path
-          height: 30, // adjust as needed
+    return CupertinoPageScaffold(
+      navigationBar: CupertinoNavigationBar(
+        middle: Image.asset(
+          'assets/images/logo_white.png',
+          height: 30,
         ),
-        backgroundColor: const Color(0xFFFB51963),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.contacts, color: Colors.white),
-            onPressed: () => context.go('/contacts'),
-          ),
-        ],
+        trailing: CupertinoButton(
+          padding: EdgeInsets.zero,
+          child: const Icon(CupertinoIcons.person_2_fill, color: CupertinoColors.white),
+          onPressed: () => context.go('/contacts'),
+        ),
+        backgroundColor: const Color(0xFFB51963),
       ),
-      body: Center(
+      child: SafeArea(
         child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            GestureDetector(
-              onTap: () => _handleSOS(context, ref),
-              child: Stack(
-                alignment: Alignment.center,
-                children: [
-                  // Outer circle
-                  Container(
-                    width: 245,
-                    height: 245,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: const Color(
-                        0xFFFF8A9D9,
-                      ).withOpacity(0.3), // faint background
-                    ),
-                  ),
-
-                  // Middle circle
-                  Container(
-                    width: 220,
-                    height: 220,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: const Color(
-                        0xFFFD92981,
-                      ).withOpacity(0.6), // darker ring
-                    ),
-                  ),
-
-                  // Inner circle with gradient
-                  Container(
-                    width: 200,
-                    height: 200,
-                    decoration: const BoxDecoration(
-                      shape: BoxShape.circle,
-                      gradient: RadialGradient(
-                        center: Alignment.center,
-                        radius: 0.8,
-                        colors: [
-                          Color(0xFFFD92981), // lighter / inner
-                          Color(0xFFF9B1955), // darker / outer
-                        ],
-                        stops: [0.3, 1.0],
-                      ),
-                    ),
-                    child: const Center(
-                      child: Text(
-                        'SOS',
-                        style: TextStyle(
-                          fontSize: 48,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.white,
+            Expanded(
+              child: Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    CupertinoButton(
+                      onPressed: () => _handleSOS(context, ref),
+                      child: Container(
+                        width: 200,
+                        height: 200,
+                        decoration: const BoxDecoration(
+                          shape: BoxShape.circle,
+                          gradient: RadialGradient(
+                            center: Alignment.center,
+                            radius: 0.8,
+                            colors: [
+                              Color(0xFFFD92981), // lighter / inner
+                              Color(0xFFF9B1955), // darker / outer
+                            ],
+                            stops: [0.3, 1.0],
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Color(0x40FD92981),
+                              blurRadius: 10.0,
+                              spreadRadius: 5.0,
+                            ),
+                          ],
+                        ),
+                        child: const Center(
+                          child: Text(
+                            'SOS',
+                            style: TextStyle(
+                              fontSize: 48,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white,
+                            ),
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                ],
+                    const SizedBox(height: 50),
+                    const Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 40.0),
+                      child: Text(
+                        'Tapping SOS will show your emergency contacts to call or message.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(fontSize: 16, color: Colors.black54),
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
-
-            const SizedBox(height: 50),
-            const Text(
-              'Tapping SOS will call all emergency contacts and send them your location.',
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 16, color: Colors.black54),
-            ),
-            const SizedBox(height: 50), // <-- pushes logo to bottom
-
             Padding(
               padding: const EdgeInsets.only(bottom: 20),
               child: Image.asset(
-                'assets/images/logo_pink.png', // place your logo file here
-                height: 60, // adjust size
+                'assets/images/logo_pink.png',
+                height: 60,
               ),
             ),
           ],

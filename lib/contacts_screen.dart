@@ -1,12 +1,9 @@
-import 'dart:async';
-
-import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_contacts/flutter_contacts.dart';
-import 'package:flutter_riverpod/legacy.dart';
 import 'package:go_router/go_router.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'main.dart'; // Import for contactsProvider
+import 'main.dart';
 
 // State provider for the search query
 final searchQueryProvider = StateProvider<String>((ref) => '');
@@ -27,88 +24,83 @@ class ContactsScreen extends ConsumerWidget {
           return name.contains(query);
         }).toList();
 
-        return Scaffold(
-          appBar: AppBar(
-            leading: IconButton(
-              icon: const Icon(Icons.arrow_back, color: Colors.white),
+        return CupertinoPageScaffold(
+          navigationBar: CupertinoNavigationBar(
+            leading: CupertinoNavigationBarBackButton(
+              color: CupertinoColors.white,
               onPressed: () => context.go('/'),
             ),
-            title: const Text(
-              'Manage Emergency Contacts',
-              style:
-                  TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
+            middle: const Text(
+              'Emergency Contacts',
+              style: TextStyle(color: CupertinoColors.white),
             ),
-            backgroundColor: const Color(0xFFFB51963),
+            trailing: CupertinoButton(
+              padding: EdgeInsets.zero,
+              child: const Icon(CupertinoIcons.add, color: CupertinoColors.white),
+              onPressed: () => _pickContact(context, ref),
+            ),
+            backgroundColor: const Color(0xFFB51963),
           ),
-          body: Column(
-            children: [
-              Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: TextField(
-                  decoration: InputDecoration(
-                    hintText: 'Search contacts...',
-                    prefixIcon: const Icon(Icons.search, color: Colors.grey),
-                    filled: true,
-                    fillColor: Colors.grey[200],
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide.none,
-                    ),
+          child: SafeArea(
+            child: Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: CupertinoSearchTextField(
+                    onChanged: (value) {
+                      ref.read(searchQueryProvider.notifier).state = value;
+                    },
                   ),
-                  onChanged: (value) {
-                    ref.read(searchQueryProvider.notifier).state = value;
-                  },
                 ),
-              ),
-              Expanded(
-                child: ListView.builder(
-                  itemCount: filteredContacts.length,
-                  itemBuilder: (context, index) {
-                    return ListTile(
-                      title: Text(
-                        filteredContacts[index]['name']!,
-                        style: TextStyle(
-                          color: Colors.grey[800],
-                          fontWeight: FontWeight.bold,
+                Expanded(
+                  child: ListView.builder(
+                    itemCount: filteredContacts.length,
+                    itemBuilder: (context, index) {
+                      return CupertinoListTile(
+                        title: Text(filteredContacts[index]['name']!),
+                        subtitle: Text(filteredContacts[index]['phone']!),
+                        trailing: CupertinoButton(
+                          padding: EdgeInsets.zero,
+                          child: const Icon(CupertinoIcons.delete, color: CupertinoColors.systemRed),
+                          onPressed: () {
+                            final originalIndex = contactList.indexOf(filteredContacts[index]);
+                            ref.read(contactsProvider.notifier).deleteContact(originalIndex);
+                          },
                         ),
-                      ),
-                      subtitle: Text(
-                        filteredContacts[index]['phone']!,
-                        style: TextStyle(color: Colors.grey[900]),
-                      ),
-                      trailing: IconButton(
-                        icon: Icon(Icons.delete, color: Colors.grey[800]),
-                        onPressed: () {
-                          // Find the original index to delete
-                          final originalIndex = contactList.indexOf(filteredContacts[index]);
-                          ref
-                              .read(contactsProvider.notifier)
-                              .deleteContact(originalIndex);
-                        }
-                      ),
-                    );
-                  },
+                      );
+                    },
+                  ),
                 ),
-              ),
-              const Spacer(), // <-- pushes logo to bottom
-              Padding(
-                padding: const EdgeInsets.only(bottom: 20),
-                child: Image.asset(
-                  'assets/images/logo_pink.png', // place your logo file here
-                  height: 60, // adjust size
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 20),
+                  child: Image.asset(
+                    'assets/images/logo_pink.png',
+                    height: 60,
+                  ),
                 ),
-              ),
-            ],
-          ),
-          floatingActionButton: FloatingActionButton(
-            backgroundColor: const Color(0xFFFB51963),
-            onPressed: () => _pickContact(context, ref),
-            child: const Icon(Icons.add, color: Colors.white),
+              ],
+            ),
           ),
         );
       },
-      loading: () => const Center(child: CircularProgressIndicator()),
+      loading: () => const Center(child: CupertinoActivityIndicator()),
       error: (error, stack) => Center(child: Text('Error: $error')),
+    );
+  }
+
+  void _showCupertinoError(BuildContext context, String message) {
+    showCupertinoDialog(
+      context: context,
+      builder: (context) => CupertinoAlertDialog(
+        title: const Text('Error'),
+        content: Text(message),
+        actions: [
+          CupertinoDialogAction(
+            child: const Text('OK'),
+            onPressed: () => Navigator.of(context).pop(),
+          ),
+        ],
+      ),
     );
   }
 
@@ -118,13 +110,7 @@ class ContactsScreen extends ConsumerWidget {
       status = await Permission.contacts.request();
       if (!status.isGranted) {
         if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
-                'Contact permission is required to select contacts.',
-              ),
-            ),
-          );
+          _showCupertinoError(context, 'Contact permission is required to select contacts.');
           await openAppSettings();
         }
         return;
@@ -141,19 +127,14 @@ class ContactsScreen extends ConsumerWidget {
               .addContact(contact.displayName, phone);
         } else {
           if (context.mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                  content: Text('Selected contact does not have a phone number.')),
-            );
+            _showCupertinoError(context, 'Selected contact does not have a phone number.');
           }
         }
       }
     } catch (e) {
       debugPrint('Error picking contact: $e');
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to pick contact. Error: $e')),
-        );
+        _showCupertinoError(context, 'Failed to pick contact. Error: $e');
       }
     }
   }
