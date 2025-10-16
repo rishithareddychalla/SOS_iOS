@@ -12,7 +12,6 @@ import 'package:geolocator/geolocator.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'contacts_screen.dart';
-import 'sos_in_progress_screen.dart';
 
 // --- State Management ---
 
@@ -83,15 +82,9 @@ final router = GoRouter(
       path: '/contacts',
       builder: (context, state) => const ContactsScreen(),
     ),
-    GoRoute(
-      path: '/sos_in_progress',
-      builder: (context, state) => const SosInProgressScreen(),
-    ),
   ],
 );
 
-final sosInProgressProvider = StateProvider<bool>((ref) => false);
-final sosNotifiedProvider = StateProvider<List<bool>>((ref) => []);
 
 // --- UI and App Setup ---
 
@@ -182,16 +175,82 @@ class MainScreen extends ConsumerWidget {
 
     final hasPermissions = await _requestPermissions(context);
     if (!hasPermissions) {
-      _showCupertinoError(
-        context,
-        'Location and Contacts permissions are required to use the SOS feature.',
-      );
       return;
     }
 
-    ref.read(sosInProgressProvider.notifier).state = true;
-    ref.read(sosNotifiedProvider.notifier).state = List<bool>.filled(contactList.length, false);
-    context.go('/sos_in_progress');
+    showCupertinoModalPopup(
+      context: context,
+      builder: (context) => CupertinoActionSheet(
+        title: const Text('Emergency Action'),
+        message: const Text(
+          'Choose an emergency action. This will use your location.',
+        ),
+        actions: <Widget>[
+          CupertinoActionSheetAction(
+            onPressed: () {
+              Navigator.of(context).pop();
+              _sendSmsToAll(context, contactList);
+            },
+            child: const Text('Send SMS to All Contacts'),
+          ),
+          CupertinoActionSheetAction(
+            onPressed: () {
+              Navigator.of(context).pop();
+              _callFirstContact(context, contactList.first['phone']!);
+            },
+            child: const Text('Call First Contact'),
+          ),
+        ],
+        cancelButton: CupertinoActionSheetAction(
+          isDefaultAction: true,
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _sendSmsToAll(
+    BuildContext context,
+    List<Map<String, String>> contacts,
+  ) async {
+    try {
+      final position = await _determinePosition();
+      final locationMessage =
+          'Emergency! I need help. My current location is: https://www.google.com/maps/search/?api=1&query=${position.latitude},${position.longitude}';
+
+      for (final contact in contacts) {
+        final uri = Uri(
+          scheme: 'sms',
+          path: contact['phone'],
+          queryParameters: <String, String>{
+            'body': locationMessage,
+          },
+        );
+        if (await canLaunchUrl(uri)) {
+          await launchUrl(uri);
+        } else {
+          _showCupertinoError(
+            context,
+            'Could not send SMS to ${contact['name']}.',
+          );
+        }
+      }
+    } catch (e) {
+      _showCupertinoError(context, 'Could not retrieve location: $e');
+    }
+  }
+
+  Future<void> _callFirstContact(
+    BuildContext context,
+    String phoneNumber,
+  ) async {
+    final uri = Uri(scheme: 'tel', path: phoneNumber);
+    if (await canLaunchUrl(uri)) {
+      await launchUrl(uri);
+    } else {
+      _showCupertinoError(context, 'Could not call $phoneNumber.');
+    }
   }
 
   void _showCupertinoError(BuildContext context, String message) {
